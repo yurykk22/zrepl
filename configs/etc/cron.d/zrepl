@@ -1,0 +1,4 @@
+# m h dom mon dow user	command
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+* * * * * root /usr/local/bin/zrepl -R -c -d -r -t -w pool1/data host2 -l /var/log/zrepl-data.log
