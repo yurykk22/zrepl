@@ -1,0 +1,385 @@
+#!/bin/bash
+
+opt_err=0
+opt_F=0
+opt_L=0
+opt_R=0
+opt_U=0
+opt_c=0
+opt_d=0
+opt_r=0
+opt_s=0
+opt_t=0
+opt_w=0
+pool=""
+LOGFILE=""
+API_KEY=""
+CHAT_ID=""
+params=()
+
+while [ -n "$1" ]
+do
+  case "$1" in
+    -F) opt_F=1;;
+    -L) opt_L=1;;
+    -R) opt_R=1;;
+    -U) opt_U=1;;
+    -c) opt_c=1;;
+    -d) opt_d=1;;
+    -r) opt_r=1;;
+    -s) opt_s=1;;
+    -t) opt_t=1;;
+    -u) opt_u=1;;
+    -w) opt_w=1;;
+    -i) CHAT_ID="$2"; shift;;
+    -k) API_KEY="$2"; shift;;
+    -l) LOGFILE="$2"; shift;;
+    -p) pool="$2"; shift;;
+    -*) echo "Неизвестная опция $1"; opt_err=1;;
+    *) params+=( $1 );;
+  esac
+  shift
+done
+if [[ $opt_U -eq 1 ]]; then opt_u=1; fi
+
+dataset=${params[0]}
+remotehost=${params[1]}
+
+if [[ -z $LOGFILE ]]; then LOGFILE=/var/log/zrepl-$(echo -n $dataset | sha1sum | awk '{print $1}' | cut -c1-8).log; fi
+
+if [[ -n $API_KEY ]] && [[ -n $CHAT_ID ]]
+then
+  telegram="https://api.telegram.org/bot$API_KEY/sendMessage?chat_id=$CHAT_ID&text="
+else
+  telegram=""
+fi
+
+function wlog()
+{
+  while read text
+  do
+    echo "$text"
+    if [[ $opt_L -eq 0 ]]; then echo "$(date "+%Y-%m-%d %T") $text" >> $LOGFILE; fi
+  done
+}
+
+function wtelegram()
+{
+  while read text
+  do
+    echo "$text"
+    if [[ -n $telegram ]]; then curl -s "$telegram$text" | wlog; echo; fi
+  done
+}
+
+if [[ ${#params[*]} -ne 2 ]]; then echo "ERR: Неверно указаны параметры" | wlog; fi
+
+if [[ $opt_err -eq 1 ]] || [[ ${#params[*]} -ne 2 ]]
+then
+  echo
+  echo "Репликация набора данных ZFS на удаленный хост"
+  echo
+  echo "Команда:"
+  echo "zrepl [-F] [-L] [-R] [-U] [-c] [-d] [-r] [-s] [-t] [-u] [-w] [-i <CHAT_ID>] [-k <API_KEY>] [-l <logfile>] [-p <destinationpool>] <dataset> <remotehost>"
+  echo "-F Принудительно откатывает файловую систему к самому последнему снимку перед выполнением операции приема"
+  echo "   При невозможности осуществить разностное копирование будет сделано полное копирование"
+  echo "-L Отключить логирование"
+  echo "-R Файловая система реплицируется, включая все дочерние файловые системы и снимки"
+  echo "-U Устанавливается запрет на монтирование файловой системы, связанной с полученным потоком"
+  echo "-c Передается более компактным потоком, используя сжатые данные"
+  echo "-d Удалить снимки в целевой файловой системе, отсутствующие в исходной"
+  echo "-r Файловая система, связанная с полученным потоком, переводится в режим только для чтения"
+  echo "-s Реверсная репликация с удаленного хоста на текущий"
+  echo "-t Отслеживать список изменяемых данных"
+  echo "-u Файловая система, связанная с полученным потоком, не монтируется"
+  echo "-w Передача зашифрованного потока"
+  echo "-i CHAT ID для оповещения через телеграм об ошибке репликации"
+  echo "-k API KEY для оповещения через телеграм об ошибке репликации"
+  echo "-l Указать свой лог-файл"
+  echo "-p Пул назначения. Если пул не указан, то он совпадает с источником"
+  echo
+  echo "Примеры:"
+  echo "zrepl -F pool1/data host1"
+  echo "Полное копирование набора данных pool1/data на удаленный хост host1"
+  echo
+  echo "zrepl pool1/data host1"
+  echo "Разностное копирование набора данных pool1/data на удаленный хост host1"
+  echo
+  exit 1
+fi
+
+LOCKFILE=/var/lock/zrepl-$(echo -n $dataset | sha1sum | awk '{print $1}' | cut -c1-8)
+
+if [[ -e ${LOCKFILE} ]] && kill -0 $(cat ${LOCKFILE}); then
+    echo "Уже выполняется" | wlog
+    exit 1
+fi
+
+# make sure the lockfile is removed when we exit and then claim it
+trap "rm -f ${LOCKFILE}; exit" INT TERM EXIT
+echo $$ > ${LOCKFILE}
+
+if [[ $opt_s -eq 0 ]]
+then
+  scmd=("" "ssh $remotehost ")
+  hosts=($(hostname) $remotehost)
+else
+  scmd=("ssh $remotehost " "")
+  hosts=($remotehost $(hostname))
+fi
+if [[ -z $pool ]]
+then
+  pool=$(echo $dataset | awk '{print $1}' FS='[/]')
+  pools=($pool $pool)
+  datasets=($dataset $dataset)
+else
+  pools=($(echo $dataset | awk '{print $1}' FS='[/]') $pool)
+  datasets=($dataset "$pool${dataset:$((${#pools[0]}-${#dataset}))}")
+fi
+
+snapnameprevious="zrepl-prev"
+snapnamecurrent="zrepl-cur"
+
+echo "Проверка имени удаленного хоста" | wlog
+if [ "${hosts[0]}" = "${hosts[1]}" ] && [ "${pools[0]}" = "${pools[1]}" ]
+then
+  echo "ERR: Невозможно реплицировать на себя" | wlog | wtelegram
+  exit 1
+fi
+
+echo "Проверка соединения с удаленным хостом $remotehost по ssh" | wlog
+ssh $remotehost exit
+if [[ $? -ne 0 ]]
+then
+  echo "ERR: Удаленный хост $remotehost не доступен или не настроено безпарольное соединение по ssh" | wlog | wtelegram
+  exit 1
+fi
+
+for ((i = 0; i < 2; i++))
+{
+  echo "Проверка ZFS на ${hosts[$i]}" | wlog
+  check=$(${scmd[$i]}zfs -V)
+  if [ -z "$check" ]
+  then
+    echo "ERR: ZFS не найден на ${hosts[$i]}" | wlog | wtelegram
+    exit 1
+  fi
+}
+
+for ((i = 0; i < 2; i++))
+{
+  echo "Проверка пула ${pools[$i]} на ${hosts[$i]}" | wlog
+  check=$(${scmd[$i]}zpool list -Ho name ${pools[$i]})
+  if [ -z "$check" ]
+  then
+    echo "ERR: Отсутствует пул ${pools[$i]} на ${hosts[$i]}" | wlog | wtelegram
+    exit 1
+  fi
+}
+
+no_dest_ds=0
+for ((i = 0; i < 2; i++))
+{
+  echo "Проверка набора данных ${datasets[$i]} на ${hosts[$i]}" | wlog
+  check=$(${scmd[$i]}zfs list -Ho name ${datasets[$i]})
+  if [ -z "$check" ]
+  then
+    echo "ERR: Отсутствует набор данных ${datasets[$i]} на ${hosts[$i]}" | wlog | wtelegram
+    if [[ $i -eq 0 ]] || [[ $opt_F -eq 0 ]]
+    then
+      exit 1
+    else
+      no_dest_ds=1
+    fi
+  fi
+}
+
+if [[ $opt_F -eq 0 ]] && [[ $opt_R -ne 0 ]]
+then
+  echo "Сравниваем наборы данных ${datasets[0]} (${hosts[0]}) и ${datasets[1]} (${hosts[1]}), включая вложенные" | wlog
+  dsl0=($(${scmd[0]}zfs list -Hro name ${datasets[0]}))
+  dsl1=($(${scmd[1]}zfs list -Hro name ${datasets[1]}))
+  if [[ ${#dsl0[*]} -eq ${#dsl1[*]} ]]
+  then
+    for ((i = 0; i < ${#dsl0[*]}; i++))
+    {
+      if [[ ${dsl0[$i]:$((${#pools[0]}-${#dsl0[$i]}))} != ${dsl1[$i]:$((${#pools[1]}-${#dsl1[$i]}))} ]]
+      then
+        echo "ERR: Наборы данных различаются. Используйте параметр -F" | wlog | wtelegram
+        exit 1
+      fi
+    }
+  else
+    echo "ERR: Наборы данных различаются. Используйте параметр -F" | wlog | wtelegram
+    exit 1
+  fi
+fi
+
+no_prev_snap=0
+if [[ $no_dest_ds -eq 0 ]]
+then
+  for ((i = 0; i < 2; i++))
+  {
+    echo "Проверка снимков ${datasets[$i]}@$snapnameprevious на ${hosts[$i]}" | wlog
+    check=$(${scmd[$i]}zfs list -H -t snapshot -o name ${datasets[$i]}@$snapnameprevious)
+    if [ -z "$check" ]
+    then
+      if [[ $opt_F -eq 0 ]]
+      then
+        echo "ERR: Не найден снимок ${datasets[$i]}@$snapnameprevious на ${hosts[$i]}. Используйте параметр -F" | wlog | wtelegram
+        exit 1
+      fi
+      no_prev_snap=1
+    else
+      if [[ $opt_F -eq 0 ]] && [[ $opt_R -ne 0 ]]
+      then
+        dsc=$(${scmd[$i]}zfs list -Hro name ${datasets[$i]} | wc -l)
+        if [[ $(${scmd[$i]}zfs list -H -t snapshot -o name ${datasets[$i]} -r | grep "@$snapnameprevious$" | wc -l) -ne $dsc ]]
+        then
+          echo "ERR: Снимки найдены не у всех наборов. Используйте параметр -F" | wlog | wtelegram
+          exit 1
+        fi
+      fi
+    fi
+  }
+fi
+
+if [[ $opt_R -eq 0 ]]; then r=""; else r="-r"; fi
+
+if [[ $no_dest_ds -eq 0 ]]; then c=2; else c=1; fi
+for ((i = 0; i < $c; i++))
+{
+  echo "Проверка снимков ${datasets[$i]}@$snapnamecurrent на ${hosts[$i]}" | wlog
+  check=$(${scmd[$i]}zfs list -H -t snapshot -o name ${datasets[$i]} $r | grep "@$snapnamecurrent$")
+  if [ -n "$check" ]
+  then
+    echo "Удаляем снимки ${datasets[$i]}@$snapnamecurrent на ${hosts[$i]}" | wlog
+    ${scmd[$i]}zfs destroy $r ${datasets[$i]}@$snapnamecurrent | wlog
+  fi
+}
+
+echo "Создаем снимок ${datasets[0]}@$snapnamecurrent на ${hosts[0]}" | wlog
+${scmd[0]}zfs snapshot $r ${datasets[0]}@$snapnamecurrent | wlog
+
+if [[ $opt_u -eq 0 ]]; then pu=""; else pu="u"; fi
+if [[ $opt_U -eq 0 ]]; then cm=""; else cm=" -o canmount=off"; fi
+if [[ $opt_c -eq 0 ]]; then pc=""; else pc="c"; fi
+if [[ $opt_r -eq 0 ]]; then ro=""; else ro=" -o readonly=on"; fi
+if [[ $opt_R -eq 0 ]]; then pR=""; else pR="R"; fi
+if [[ $opt_w -eq 0 ]]; then pw=""; else pw="w"; fi
+sendparams="-$pR${pc}v$pw"
+recvparams="-${pu}v -d -o atime=off$ro$cm"
+
+dis_icopy=0
+if [[ $no_prev_snap -ne 0 ]] || [[ $no_dest_ds -ne 0 ]]
+then
+  dis_icopy=1
+fi
+
+if [[ $opt_F -ne 0 ]]
+then
+
+  err=0
+
+  if [[ $dis_icopy -eq 0 ]]
+  then
+    if [[ $opt_t -ne 0 ]]
+    then
+      outp=$(${scmd[0]}zfs diff ${datasets[0]}@$snapnameprevious ${datasets[0]}@$snapnamecurrent)
+      if [[ -n $outp ]]
+      then
+        echo "Изменения в файловой системе с последнего снимка:" | wlog
+        echo "$outp" | wlog
+      else
+        echo "Изменений в файловой системе с последнего снимка не обнаружено" | wlog
+      fi
+    fi
+    echo "Разностное копирование с восстановлением снимка с ${datasets[0]}@$snapnamecurrent (${hosts[0]}) на ${datasets[1]}@$snapnamecurrent (${hosts[1]})" | wlog
+    ${scmd[0]}zfs send $sendparams -I ${datasets[0]}@$snapnameprevious ${datasets[0]}@$snapnamecurrent 2> >(wlog >&2) | ${scmd[1]}zfs recv -F $recvparams ${pools[1]} 2>&1 | wlog
+    err=${PIPESTATUS[1]}
+    if [[ $err -ne 0 ]]; then echo "ERR: Ошибка при репликации потока данных ZFS ${datasets[0]} (${hosts[0]}) на ${datasets[1]} (${hosts[1]})" | wlog; fi
+  fi
+
+  if [[ $dis_icopy -ne 0 ]] || [[ $err -ne 0 ]]
+  then
+    echo "Удаляем снимок ${datasets[0]}@$snapnameprevious на ${hosts[0]}" | wlog
+    ${scmd[0]}zfs destroy $r ${datasets[0]}@$snapnameprevious | wlog
+    if [[ $c -eq 2 ]]
+    then
+      echo "Удаляем набор данных ${datasets[1]} на ${hosts[1]}" | wlog
+      ${scmd[1]}zfs destroy $r ${datasets[1]} | wlog
+    fi
+    echo "Полное копирование с ${datasets[0]}@$snapnamecurrent (${hosts[0]}) на ${datasets[1]}@$snapnamecurrent (${hosts[1]})" | wlog
+    ${scmd[0]}zfs send $sendparams ${datasets[0]}@$snapnamecurrent 2> >(wlog >&2) | ${scmd[1]}zfs recv -F $recvparams ${pools[1]} 2>&1 | wlog
+    err=${PIPESTATUS[1]}
+    if [[ $err -ne 0 ]]; then echo "ERR: Ошибка при репликации потока данных ZFS ${datasets[0]} (${hosts[0]}) на ${datasets[1]} (${hosts[1]})" | wlog | wtelegram; exit 1; fi
+  fi
+
+else
+
+  if [[ $opt_t -ne 0 ]]
+  then
+    outp=$(${scmd[0]}zfs diff ${datasets[0]}@$snapnameprevious ${datasets[0]}@$snapnamecurrent)
+    if [[ -n $outp ]]
+    then
+      echo "Изменения в файловой системе с последнего снимка:" | wlog
+      echo "$outp" | wlog
+    else
+      echo "Изменений в файловой системе с последнего снимка не обнаружено" | wlog
+    fi
+  fi
+  echo "Разностное копирование с ${datasets[0]}@$snapnamecurrent (${hosts[0]}) на ${datasets[1]}@$snapnamecurrent (${hosts[1]})" | wlog
+  ${scmd[0]}zfs send $sendparams -I ${datasets[0]}@$snapnameprevious ${datasets[0]}@$snapnamecurrent 2> >(wlog >&2) | ${scmd[1]}zfs recv $recvparams ${pools[1]} 2>&1 | wlog
+  err=${PIPESTATUS[1]}
+  if [[ $err -ne 0 ]]; then echo "ERR: Ошибка при репликации потока данных ZFS ${datasets[0]} (${hosts[0]}) на ${datasets[1]} (${hosts[1]})" | wlog | wtelegram; exit 1; fi
+
+fi
+
+if [[ $opt_R -ne 0 ]] && [[ $opt_U -ne 0 ]]
+then
+  echo "Устанавливаем запрет на монтирование наборов данных ${datasets[1]} (${hosts[1]})" | wlog
+  dss=$(${scmd[1]}zfs list -Hro name ${datasets[1]})
+  for ds in $dss
+  do
+    ${scmd[1]}zfs set canmount=off $ds | wlog
+  done
+fi
+
+for ((i = 0; i < 2; i++))
+{
+  echo "Удаляем снимок ${datasets[$i]}@$snapnameprevious на ${hosts[$i]}" | wlog
+  ${scmd[$i]}zfs destroy $r ${datasets[$i]}@$snapnameprevious | wlog
+}
+for ((i = 0; i < 2; i++))
+{
+  echo "Переименовываем снимок ${datasets[$i]}@$snapnamecurrent в ${datasets[$i]}@$snapnameprevious на ${hosts[$i]}" | wlog
+  ${scmd[$i]}zfs rename $r ${datasets[$i]}@$snapnamecurrent ${datasets[$i]}@$snapnameprevious | wlog
+}
+
+if [[ $opt_d -ne 0 ]]
+then
+  echo "Удаляем снимки в ${datasets[1]} (${hosts[1]}), отсутствующие в ${datasets[0]} (${hosts[0]})" | wlog
+  dsl0=($(${scmd[0]}zfs list -H $r -t snapshot -o name ${datasets[0]}))
+  dsl1=($(${scmd[1]}zfs list -H $r -t snapshot -o name ${datasets[1]}))
+  for ((j = 0; j < ${#dsl1[*]}; j++))
+  {
+    find=0
+    for ((i = 0; i < ${#dsl0[*]}; i++))
+    {
+      if [[ ${dsl0[$i]:$((${#pools[0]}-${#dsl0[$i]}))} = ${dsl1[$j]:$((${#pools[1]}-${#dsl1[$j]}))} ]]
+      then
+        find=1
+      fi
+    }
+    if [[ $find -eq 0 ]]
+    then
+      echo "- ${dsl1[$j]} (${hosts[1]})" | wlog
+      ${scmd[1]}zfs destroy ${dsl1[$j]} | wlog
+    fi
+  }
+fi
+
+echo "Репликация данных завершена" | wlog
+
+rm -f ${LOCKFILE}
+
