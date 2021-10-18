@@ -3,7 +3,7 @@
 
 Команда:
 
-`zrepl [-F] [-L] [-R] [-U] [-c] [-d] [-r] [-s] [-t] [-u] [-w] [-h \<ssh identity file\>] [-i \<CHAT_ID\>] [-k \<API_KEY\>] [-l \<logfile\>] [-p \<destinationpool\>] \<dataset\> \<remotehost\>`  
+`zrepl [-F] [-L] [-R] [-U] [-c] [-d] [-r] [-s] [-t] [-u] [-w] [-h <ssh identity file>] [-i <CHAT_ID>] [-k <API_KEY>] [-l <logfile>] [-p <destinationpool>] <dataset> <remotehost>`  
   `-F` Принудительно откатывает файловую систему к самому последнему снимку перед выполнением операции приема  
   При невозможности осуществить разностное копирование будет сделано полное копирование  
   `-L` Отключить логирование  
