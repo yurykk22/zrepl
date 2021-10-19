@@ -122,14 +122,15 @@ fi
 trap "rm -f ${LOCKFILE}; exit" INT TERM EXIT
 echo $$ > ${LOCKFILE}
 
-if [[ -z $SSH_KEY ]]; then sshs=""; else sshs=" -i $SSH_KEY"; fi
+if [[ -z $SSH_KEY ]]; then si=""; else si=" -i $SSH_KEY"; fi
+scmdr="ssh$si $remotehost "
 
 if [[ $opt_s -eq 0 ]]
 then
-  scmd=("" "ssh$sshs $remotehost ")
+  scmd=("" "$scmdr")
   hosts=($(hostname) $remotehost)
 else
-  scmd=("ssh$sshs $remotehost " "")
+  scmd=("$scmdr" "")
   hosts=($remotehost $(hostname))
 fi
 if [[ -z $pool ]]
@@ -153,7 +154,7 @@ then
 fi
 
 echo "Проверка соединения с удаленным хостом $remotehost по ssh" | wlog
-ssh $remotehost exit
+${scmdr}exit
 if [[ $? -ne 0 ]]
 then
   echo "ERR: Удаленный хост $remotehost не доступен или не настроено безпарольное соединение по ssh" | wlog | wtelegram
