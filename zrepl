@@ -1,6 +1,7 @@
 #!/bin/bash
 
 opt_err=0
+opt_C=0
 opt_F=0
 opt_L=0
 opt_R=0
@@ -21,6 +22,7 @@ params=()
 while [ -n "$1" ]
 do
   case "$1" in
+    -C) opt_C=1;;
     -F) opt_F=1;;
     -L) opt_L=1;;
     -R) opt_R=1;;
@@ -82,7 +84,8 @@ then
   echo "Репликация набора данных ZFS на удаленный хост"
   echo
   echo "Команда:"
-  echo "zrepl [-F] [-L] [-R] [-U] [-c] [-d] [-r] [-s] [-t] [-u] [-w] [-h <identity file>] [-i <chat id>] [-k <api key>] [-l <log file>] [-p <destination pool>] <dataset> <remote host>"
+  echo "zrepl [-C] [-F] [-L] [-R] [-U] [-c] [-d] [-r] [-s] [-t] [-u] [-w] [-h <identity file>] [-i <chat id>] [-k <api key>] [-l <log file>] [-p <destination pool>] <dataset> <remote host>"
+  echo "-C Сжимать данные при передаче. Актуально для несжатых данных и низкоскоростных каналов передачи"
   echo "-F Принудительно откатывает файловую систему к самому последнему снимку перед выполнением операции приема"
   echo "   При невозможности осуществить разностное копирование будет сделано полное копирование"
   echo "-L Отключить логирование"
@@ -123,8 +126,9 @@ trap "rm -f ${LOCKFILE}; exit" INT TERM EXIT
 echo $$ > ${LOCKFILE}
 
 if [[ -z $SSH_KEY ]]; then si=""; else si=" -i $SSH_KEY"; fi
-sc=" -o ControlMaster=auto -o ControlPersist=80 -o ControlPath=~/.ssh/control-%h-%r"
-scmdr="ssh$si$sc $remotehost "
+if [[ $opt_C -eq 0 ]]; then sC=""; else sC=" -C"; fi
+so=" -o ControlMaster=auto -o ControlPersist=80 -o ControlPath=~/.ssh/control-%h-%r"
+scmdr="ssh$si$sC$so $remotehost "
 
 if [[ $opt_s -eq 0 ]]
 then
