@@ -123,7 +123,8 @@ trap "rm -f ${LOCKFILE}; exit" INT TERM EXIT
 echo $$ > ${LOCKFILE}
 
 if [[ -z $SSH_KEY ]]; then si=""; else si=" -i $SSH_KEY"; fi
-scmdr="ssh$si $remotehost "
+sc=" -o ControlMaster=auto -o ControlPersist=80 -o ControlPath=~/.ssh/control-%h-%p-%r"
+scmdr="ssh$si$sc $remotehost "
 
 if [[ $opt_s -eq 0 ]]
 then
