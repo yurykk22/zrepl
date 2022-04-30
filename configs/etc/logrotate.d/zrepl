@@ -1,6 +1,6 @@
 /var/log/zrepl-*.log
 {
-  rotate 14
+  rotate 4
   daily
   compress
   missingok

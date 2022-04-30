@@ -127,7 +127,7 @@ echo $$ > ${LOCKFILE}
 
 if [[ -z $SSH_KEY ]]; then si=""; else si=" -i $SSH_KEY"; fi
 if [[ $opt_C -eq 0 ]]; then sC=""; else sC=" -C"; fi
-so=" -o ControlMaster=auto -o ControlPersist=80 -o ControlPath=~/.ssh/control-%h-%r"
+so=" -o ControlMaster=auto -o ControlPersist=80 -o ControlPath=~/.ssh/control-%h-%r -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 scmdr="ssh$si$sC$so $remotehost "
 
 if [[ $opt_s -eq 0 ]]
